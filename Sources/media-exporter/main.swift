@@ -42,9 +42,29 @@ struct MediaExporter: ParsableCommand {
             print()
             
             try createOutputFolder()
+            
+            // Run the export on a background queue to avoid any main thread blocking
+            let exportQueue = DispatchQueue(label: "media-exporter.background", qos: .userInitiated)
+            let mainSemaphore = DispatchSemaphore(value: 0)
+            var exportedCount = 0
+            var exportError: Error?
             let overallStartTime = Date()
-            let exportedCount = try exportAssets(from: startDate, to: endDate)
+            
+            exportQueue.async {
+                do {
+                    exportedCount = try self.exportAssets(from: startDate, to: endDate)
+                } catch {
+                    exportError = error
+                }
+                mainSemaphore.signal()
+            }
+            
+            mainSemaphore.wait()
             let totalDuration = Date().timeIntervalSince(overallStartTime)
+            
+            if let error = exportError {
+                throw error
+            }
             
             print("\n=== Export Complete ===")
             print("Successfully exported \(exportedCount) files to \(outputFolder)")
@@ -72,78 +92,84 @@ struct MediaExporter: ParsableCommand {
         
         print("Found \(totalAssets) assets to export...")
         
+        // Process each asset sequentially using a simple loop without semaphores
         for i in 0..<fetchResult.count {
             let asset = fetchResult.object(at: i)
-            let semaphore = DispatchSemaphore(value: 0)
-            var success = false
             
+            let success: Bool
             switch asset.mediaType {
             case .image:
-                exportPhoto(asset: asset, index: i + 1, total: totalAssets) { exportSuccess in
-                    success = exportSuccess
-                    semaphore.signal()
-                }
+                success = exportPhotoSync(asset: asset, index: i + 1, total: totalAssets)
             case .video:
-                exportVideo(asset: asset, index: i + 1, total: totalAssets) { exportSuccess in
-                    success = exportSuccess
-                    semaphore.signal()
-                }
+                success = exportVideoSync(asset: asset, index: i + 1, total: totalAssets)
             default:
                 print("[\(i + 1)/\(totalAssets)] Skipping unsupported asset type")
-                semaphore.signal()
+                success = false
             }
             
-            semaphore.wait()
             if success { exportedCount += 1 }
         }
         
         return exportedCount
     }
     
-    private func exportPhoto(asset: PHAsset, index: Int, total: Int, completion: @escaping (Bool) -> Void) {
+    private func exportPhotoSync(asset: PHAsset, index: Int, total: Int) -> Bool {
         let startTime = Date()
         print("[\(index)/\(total)] Starting photo export...")
         
         let options = PHImageRequestOptions()
         options.version = .current
         options.deliveryMode = .highQualityFormat
-        options.isNetworkAccessAllowed = true
-        options.isSynchronous = false
+        options.isNetworkAccessAllowed = false
+        options.isSynchronous = true  // Make it synchronous to avoid deadlock
         
-        PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { [self] data, dataUTI, orientation, info in
-            guard let imageData = data else {
-                let duration = Date().timeIntervalSince(startTime)
-                print("[\(index)/\(total)] ❌ Failed to get image data (\(String(format: "%.2f", duration))s)")
-                completion(false)
-                return
+        var imageData: Data?
+        var requestError: Error?
+        
+        PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, dataUTI, orientation, info in
+            imageData = data
+            if let error = info?[PHImageErrorKey] as? Error {
+                requestError = error
             }
+        }
+        
+        if let error = requestError {
+            let duration = Date().timeIntervalSince(startTime)
+            print("[\(index)/\(total)] ❌ Photo request error: \(error.localizedDescription) (\(String(format: "%.2f", duration))s)")
+            return false
+        }
+        
+        guard let data = imageData else {
+            let duration = Date().timeIntervalSince(startTime)
+            print("[\(index)/\(total)] ❌ Failed to get image data (\(String(format: "%.2f", duration))s)")
+            return false
+        }
+        
+        do {
+            let tempFileName = UUID().uuidString + ".jpg"
+            let tempFilePath = (outputFolder as NSString).appendingPathComponent(tempFileName)
+            let tempURL = URL(fileURLWithPath: tempFilePath)
             
-            do {
-                let tempFileName = UUID().uuidString + ".jpg"
-                let tempFilePath = (outputFolder as NSString).appendingPathComponent(tempFileName)
-                let tempURL = URL(fileURLWithPath: tempFilePath)
-                
-                let jpegData = try convertToJPEG(data: imageData)
-                try jpegData.write(to: tempURL)
-                
-                let creationDate = extractCreationDate(from: imageData) ?? asset.creationDate ?? Date()
-                let finalFileName = generateFileName(from: creationDate, isVideo: false)
-                let finalFilePath = (outputFolder as NSString).appendingPathComponent(finalFileName)
-                
-                try FileManager.default.moveItem(atPath: tempFilePath, toPath: finalFilePath)
-                
-                let duration = Date().timeIntervalSince(startTime)
-                print("[\(index)/\(total)] ✅ Photo exported: \(finalFileName) (\(String(format: "%.2f", duration))s)")
-                completion(true)
-            } catch {
-                let duration = Date().timeIntervalSince(startTime)
-                print("[\(index)/\(total)] ❌ Error processing photo: \(error.localizedDescription) (\(String(format: "%.2f", duration))s)")
-                completion(false)
-            }
+            let jpegData = try convertToJPEG(data: data)
+            try jpegData.write(to: tempURL)
+            
+            let creationDate = extractCreationDate(from: data) ?? asset.creationDate ?? Date()
+            let finalFileName = generateFileName(from: creationDate, isVideo: false)
+            let finalFilePath = (outputFolder as NSString).appendingPathComponent(finalFileName)
+            
+            try FileManager.default.moveItem(atPath: tempFilePath, toPath: finalFilePath)
+            
+            let duration = Date().timeIntervalSince(startTime)
+            print("[\(index)/\(total)] ✅ Photo exported: \(finalFileName) (\(String(format: "%.2f", duration))s)")
+            return true
+        } catch {
+            let duration = Date().timeIntervalSince(startTime)
+            print("[\(index)/\(total)] ❌ Error processing photo: \(error.localizedDescription) (\(String(format: "%.2f", duration))s)")
+            return false
         }
     }
     
-    private func exportVideo(asset: PHAsset, index: Int, total: Int, completion: @escaping (Bool) -> Void) {
+    private func exportVideoSync(asset: PHAsset, index: Int, total: Int) -> Bool {
         let startTime = Date()
         let isEdited = asset.hasAdjustments
         let exportMethod = isEdited ? "re-encoding" : "copying"
@@ -152,49 +178,62 @@ struct MediaExporter: ParsableCommand {
         let options = PHVideoRequestOptions()
         options.version = .current
         options.deliveryMode = .highQualityFormat
-        options.isNetworkAccessAllowed = true
+        options.isNetworkAccessAllowed = false
         
-        PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { [self] avAsset, audioMix, info in
-            guard let avAsset = avAsset else {
-                let duration = Date().timeIntervalSince(startTime)
-                print("[\(index)/\(total)] ❌ Failed to get AVAsset for video (\(String(format: "%.2f", duration))s)")
-                completion(false)
-                return
-            }
-            
-            let creationDate = asset.creationDate ?? Date()
-            let finalFileName = generateFileName(from: creationDate, isVideo: true)
-            let finalFilePath = (outputFolder as NSString).appendingPathComponent(finalFileName)
-            let outputURL = URL(fileURLWithPath: finalFilePath)
-            
-            // Use passthrough for original videos (fast copy), highest quality for edited videos
-            let preset = isEdited ? AVAssetExportPresetHighestQuality : AVAssetExportPresetPassthrough
-            
-            guard let exportSession = AVAssetExportSession(asset: avAsset, presetName: preset) else {
-                let duration = Date().timeIntervalSince(startTime)
-                print("[\(index)/\(total)] ❌ Failed to create export session (\(String(format: "%.2f", duration))s)")
-                completion(false)
-                return
-            }
-            
-            exportSession.outputURL = outputURL
-            exportSession.outputFileType = .mov
-            
-            exportSession.exportAsynchronously {
-                let duration = Date().timeIntervalSince(startTime)
-                switch exportSession.status {
-                case .completed:
-                    print("[\(index)/\(total)] ✅ Video exported: \(finalFileName) (\(String(format: "%.2f", duration))s)")
-                    completion(true)
-                case .failed, .cancelled:
-                    print("[\(index)/\(total)] ❌ Video export failed: \(exportSession.error?.localizedDescription ?? "Unknown error") (\(String(format: "%.2f", duration))s)")
-                    completion(false)
-                default:
-                    print("[\(index)/\(total)] ❌ Video export failed with unknown status (\(String(format: "%.2f", duration))s)")
-                    completion(false)
-                }
-            }
+        var avAssetResult: AVAsset?
+        let assetSemaphore = DispatchSemaphore(value: 0)
+        
+        PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { avAsset, audioMix, info in
+            avAssetResult = avAsset
+            assetSemaphore.signal()
         }
+        
+        assetSemaphore.wait()
+        
+        guard let avAsset = avAssetResult else {
+            let duration = Date().timeIntervalSince(startTime)
+            print("[\(index)/\(total)] ❌ Failed to get AVAsset for video (\(String(format: "%.2f", duration))s)")
+            return false
+        }
+        
+        let creationDate = asset.creationDate ?? Date()
+        let finalFileName = generateFileName(from: creationDate, isVideo: true)
+        let finalFilePath = (outputFolder as NSString).appendingPathComponent(finalFileName)
+        let outputURL = URL(fileURLWithPath: finalFilePath)
+        
+        // Use passthrough for original videos (fast copy), highest quality for edited videos
+        let preset = isEdited ? AVAssetExportPresetHighestQuality : AVAssetExportPresetPassthrough
+        
+        guard let exportSession = AVAssetExportSession(asset: avAsset, presetName: preset) else {
+            let duration = Date().timeIntervalSince(startTime)
+            print("[\(index)/\(total)] ❌ Failed to create export session (\(String(format: "%.2f", duration))s)")
+            return false
+        }
+        
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .mov
+        
+        let exportSemaphore = DispatchSemaphore(value: 0)
+        var exportSuccess = false
+        
+        exportSession.exportAsynchronously {
+            let duration = Date().timeIntervalSince(startTime)
+            switch exportSession.status {
+            case .completed:
+                print("[\(index)/\(total)] ✅ Video exported: \(finalFileName) (\(String(format: "%.2f", duration))s)")
+                exportSuccess = true
+            case .failed, .cancelled:
+                print("[\(index)/\(total)] ❌ Video export failed: \(exportSession.error?.localizedDescription ?? "Unknown error") (\(String(format: "%.2f", duration))s)")
+                exportSuccess = false
+            default:
+                print("[\(index)/\(total)] ❌ Video export failed with unknown status (\(String(format: "%.2f", duration))s)")
+                exportSuccess = false
+            }
+            exportSemaphore.signal()
+        }
+        
+        exportSemaphore.wait()
+        return exportSuccess
     }
     
     private func convertToJPEG(data: Data) throws -> Data {
