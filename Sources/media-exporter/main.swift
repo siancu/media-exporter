@@ -48,7 +48,7 @@ struct MediaExporter: ParsableCommand {
             
             print("\n=== Export Complete ===")
             print("Successfully exported \(exportedCount) files to \(outputFolder)")
-            print("Total time: %.2f seconds", totalDuration)
+            print("Total time: \(String(format: "%.2f", totalDuration)) seconds")
         } catch {
             print("Error: \(error.localizedDescription)")
         }
@@ -68,33 +68,35 @@ struct MediaExporter: ParsableCommand {
         
         let fetchResult = PHAsset.fetchAssets(with: fetchOptions)
         var exportedCount = 0
-        let dispatchGroup = DispatchGroup()
         let totalAssets = fetchResult.count
         
         print("Found \(totalAssets) assets to export...")
         
         for i in 0..<fetchResult.count {
             let asset = fetchResult.object(at: i)
-            dispatchGroup.enter()
+            let semaphore = DispatchSemaphore(value: 0)
+            var success = false
             
             switch asset.mediaType {
             case .image:
-                exportPhoto(asset: asset, index: i + 1, total: totalAssets) { success in
-                    if success { exportedCount += 1 }
-                    dispatchGroup.leave()
+                exportPhoto(asset: asset, index: i + 1, total: totalAssets) { exportSuccess in
+                    success = exportSuccess
+                    semaphore.signal()
                 }
             case .video:
-                exportVideo(asset: asset, index: i + 1, total: totalAssets) { success in
-                    if success { exportedCount += 1 }
-                    dispatchGroup.leave()
+                exportVideo(asset: asset, index: i + 1, total: totalAssets) { exportSuccess in
+                    success = exportSuccess
+                    semaphore.signal()
                 }
             default:
                 print("[\(i + 1)/\(totalAssets)] Skipping unsupported asset type")
-                dispatchGroup.leave()
+                semaphore.signal()
             }
+            
+            semaphore.wait()
+            if success { exportedCount += 1 }
         }
         
-        dispatchGroup.wait()
         return exportedCount
     }
     
@@ -111,7 +113,7 @@ struct MediaExporter: ParsableCommand {
         PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { [self] data, dataUTI, orientation, info in
             guard let imageData = data else {
                 let duration = Date().timeIntervalSince(startTime)
-                print("[\(index)/\(total)] ❌ Failed to get image data (%.2fs)", duration)
+                print("[\(index)/\(total)] ❌ Failed to get image data (\(String(format: "%.2f", duration))s)")
                 completion(false)
                 return
             }
@@ -131,11 +133,11 @@ struct MediaExporter: ParsableCommand {
                 try FileManager.default.moveItem(atPath: tempFilePath, toPath: finalFilePath)
                 
                 let duration = Date().timeIntervalSince(startTime)
-                print("[\(index)/\(total)] ✅ Photo exported: \(finalFileName) (%.2fs)", duration)
+                print("[\(index)/\(total)] ✅ Photo exported: \(finalFileName) (\(String(format: "%.2f", duration))s)")
                 completion(true)
             } catch {
                 let duration = Date().timeIntervalSince(startTime)
-                print("[\(index)/\(total)] ❌ Error processing photo: \(error.localizedDescription) (%.2fs)", duration)
+                print("[\(index)/\(total)] ❌ Error processing photo: \(error.localizedDescription) (\(String(format: "%.2f", duration))s)")
                 completion(false)
             }
         }
@@ -153,7 +155,7 @@ struct MediaExporter: ParsableCommand {
         PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { [self] avAsset, audioMix, info in
             guard let avAsset = avAsset else {
                 let duration = Date().timeIntervalSince(startTime)
-                print("[\(index)/\(total)] ❌ Failed to get AVAsset for video (%.2fs)", duration)
+                print("[\(index)/\(total)] ❌ Failed to get AVAsset for video (\(String(format: "%.2f", duration))s)")
                 completion(false)
                 return
             }
@@ -165,7 +167,7 @@ struct MediaExporter: ParsableCommand {
             
             guard let exportSession = AVAssetExportSession(asset: avAsset, presetName: AVAssetExportPresetHighestQuality) else {
                 let duration = Date().timeIntervalSince(startTime)
-                print("[\(index)/\(total)] ❌ Failed to create export session (%.2fs)", duration)
+                print("[\(index)/\(total)] ❌ Failed to create export session (\(String(format: "%.2f", duration))s)")
                 completion(false)
                 return
             }
@@ -177,13 +179,13 @@ struct MediaExporter: ParsableCommand {
                 let duration = Date().timeIntervalSince(startTime)
                 switch exportSession.status {
                 case .completed:
-                    print("[\(index)/\(total)] ✅ Video exported: \(finalFileName) (%.2fs)", duration)
+                    print("[\(index)/\(total)] ✅ Video exported: \(finalFileName) (\(String(format: "%.2f", duration))s)")
                     completion(true)
                 case .failed, .cancelled:
-                    print("[\(index)/\(total)] ❌ Video export failed: \(exportSession.error?.localizedDescription ?? "Unknown error") (%.2fs)", duration)
+                    print("[\(index)/\(total)] ❌ Video export failed: \(exportSession.error?.localizedDescription ?? "Unknown error") (\(String(format: "%.2f", duration))s)")
                     completion(false)
                 default:
-                    print("[\(index)/\(total)] ❌ Video export failed with unknown status (%.2fs)", duration)
+                    print("[\(index)/\(total)] ❌ Video export failed with unknown status (\(String(format: "%.2f", duration))s)")
                     completion(false)
                 }
             }
