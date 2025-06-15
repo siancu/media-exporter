@@ -145,7 +145,9 @@ struct MediaExporter: ParsableCommand {
     
     private func exportVideo(asset: PHAsset, index: Int, total: Int, completion: @escaping (Bool) -> Void) {
         let startTime = Date()
-        print("[\(index)/\(total)] Starting video export...")
+        let isEdited = asset.hasAdjustments
+        let exportMethod = isEdited ? "re-encoding" : "copying"
+        print("[\(index)/\(total)] Starting video export (\(exportMethod))...")
         
         let options = PHVideoRequestOptions()
         options.version = .current
@@ -165,7 +167,10 @@ struct MediaExporter: ParsableCommand {
             let finalFilePath = (outputFolder as NSString).appendingPathComponent(finalFileName)
             let outputURL = URL(fileURLWithPath: finalFilePath)
             
-            guard let exportSession = AVAssetExportSession(asset: avAsset, presetName: AVAssetExportPresetHighestQuality) else {
+            // Use passthrough for original videos (fast copy), highest quality for edited videos
+            let preset = isEdited ? AVAssetExportPresetHighestQuality : AVAssetExportPresetPassthrough
+            
+            guard let exportSession = AVAssetExportSession(asset: avAsset, presetName: preset) else {
                 let duration = Date().timeIntervalSince(startTime)
                 print("[\(index)/\(total)] ❌ Failed to create export session (\(String(format: "%.2f", duration))s)")
                 completion(false)

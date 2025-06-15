@@ -123,8 +123,10 @@ Output folder: ~/Desktop/January2024
 Found 150 assets to export...
 [1/150] Starting photo export...
 [1/150] ✅ Photo exported: 2024-01-01 10.30.25.jpg (0.85s)
-[2/150] Starting video export...
-[2/150] ✅ Video exported: 2024-01-01 15.22.10.mov (3.42s)
+[2/150] Starting video export (copying)...
+[2/150] ✅ Video exported: 2024-01-01 15.22.10.mov (0.42s)
+[3/150] Starting video export (re-encoding)...
+[3/150] ✅ Video exported: 2024-01-01 16.45.30.mov (8.15s)
 ...
 
 === Export Complete ===
@@ -136,7 +138,7 @@ Total time: 125.30 seconds
 
 - Uses PhotoKit framework for Photos library access
 - Exports photos as JPEG using CoreImage
-- Exports videos using AVFoundation with highest quality preset
+- **Smart video export**: Uses passthrough (copy) for original videos, re-encoding only for edited videos
 - Extracts EXIF metadata using ImageIO framework
 - Supports edited versions of photos and videos
 - Individual export timing with success/failure indicators
